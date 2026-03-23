@@ -1,0 +1,35 @@
+# Environnement virtuel
+env/
+venv/
+.env/
+
+# Données
+data/*.duckdb
+data/*.csv
+data/*.pdf
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Fichiers sensibles
+.env
+*.log
+
+# Tests
+.pytest_cache/
+.coverage
+*.pdf
