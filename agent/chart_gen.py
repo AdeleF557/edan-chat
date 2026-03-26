@@ -14,20 +14,40 @@ def auto_chart(df, chart_type, question=""):
         return None
 
     # Choisir la meilleure colonne categorielle
-    # Priorite : candidat > parti > region > premiere colonne
-    preferred_cats = ["candidat", "parti", "region"]
+    preferred_cats = ["candidat", "parti", "region", "circonscription"]
     x_col = next((c for c in preferred_cats if c in cat_cols), cat_cols[0])
 
-    # Choisir la meilleure colonne numerique
-    # Priorite : score > nb_gagnants > avg_taux > premiere colonne
-    preferred_nums = ["score", "nb_gagnants", "avg_taux_participation",
-                      "total_votants", "count_star()"]
+    # ── CORRECTION : gérer "count_star()" et autres alias DuckDB ──
+    # DuckDB génère parfois des colonnes comme "count_star()" ou "COUNT(*)"
+    # On renomme ces colonnes avant d'afficher
+    df = df.copy()
+    rename_map = {}
+    for col in df.columns:
+        col_lower = col.lower()
+        if "count_star" in col_lower or col_lower in ("count(*)", "count"):
+            rename_map[col] = "nb_gagnants"
+        elif col_lower == "avg(taux_participation)":
+            rename_map[col] = "avg_taux_participation"
+        elif col_lower == "sum(score)":
+            rename_map[col] = "total_voix"
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    # Recalculer num_cols après renommage
+    num_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    if not num_cols:
+        return None
+
+    # Choisir la meilleure colonne numerique (ordre de priorité)
+    preferred_nums = [
+        "score", "nb_gagnants", "avg_taux_participation",
+        "total_votants", "total_voix", "pct_score",
+    ]
     y_col = next((c for c in preferred_nums if c in num_cols), num_cols[0])
 
     plot_df = df.head(20).copy()
 
-    # Creer un label court pour l affichage
-    # Si on a candidat + region, combiner les deux
+    # Créer un label court pour l'affichage
     if "candidat" in plot_df.columns and "region" in plot_df.columns:
         plot_df["label"] = (
             plot_df["candidat"].str[:25] + " (" +
@@ -35,7 +55,6 @@ def auto_chart(df, chart_type, question=""):
         )
         x_col = "label"
     elif x_col in plot_df.columns:
-        # Tronquer les labels trop longs
         plot_df["label"] = plot_df[x_col].astype(str).str[:30]
         x_col = "label"
 
@@ -47,8 +66,6 @@ def auto_chart(df, chart_type, question=""):
 
 def bar_chart(df, x, y, title=""):
     df_sorted = df.sort_values(y, ascending=True).tail(15)
-
-    # Hauteur dynamique selon nombre de barres
     height = max(400, len(df_sorted) * 35)
 
     fig = px.bar(
@@ -96,7 +113,6 @@ def bar_chart(df, x, y, title=""):
 
 
 def pie_chart(df, labels, values, title=""):
-    # Tronquer les labels pour le camembert
     df = df.copy()
     df[labels] = df[labels].astype(str).str[:25]
 
@@ -113,7 +129,10 @@ def pie_chart(df, labels, values, title=""):
         textposition="inside",
         textinfo="percent+label",
         insidetextfont=dict(size=12),
-        hovertemplate="<b>%{label}</b><br>Valeur: %{value:,}<br>Part: %{percent}<extra></extra>",
+        hovertemplate=(
+            "<b>%{label}</b><br>Valeur: %{value:,}"
+            "<br>Part: %{percent}<extra></extra>"
+        ),
     )
 
     fig.update_layout(
@@ -138,13 +157,23 @@ def pie_chart(df, labels, values, title=""):
     return fig
 
 
-def turnout_chart(df, title="Taux de participation par region"):
+def turnout_chart(df, title="Taux de participation par région"):
     """Graphique specialise pour le taux de participation."""
-    if "region" not in df.columns or "avg_taux_participation" not in df.columns:
-        return bar_chart(df,
-                        df.columns[0],
-                        df.columns[1],
-                        title=title)
+    if "avg_taux_participation" not in df.columns:
+        # Essayer de détecter une colonne taux
+        taux_col = next(
+            (c for c in df.columns if "taux" in c.lower() or "participation" in c.lower()),
+            None,
+        )
+        if taux_col and "region" in df.columns:
+            df = df.rename(columns={taux_col: "avg_taux_participation"})
+        elif len(df.columns) >= 2:
+            return bar_chart(df, df.columns[0], df.columns[1], title=title)
+        else:
+            return None
+
+    if "region" not in df.columns:
+        return bar_chart(df, df.columns[0], "avg_taux_participation", title=title)
 
     df_sorted = df.sort_values("avg_taux_participation", ascending=True)
 

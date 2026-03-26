@@ -1,430 +1,388 @@
-# 🗳️ EDAN 2025 — Chat avec les résultats électoraux
-
-> Application de chat permettant d'interroger en langage naturel les résultats
-> des élections législatives ivoiriennes du 27 décembre 2025.
-
-
-
-
-
-
-
-
-
-
+# Suite du README — Niveaux 2, 3 et 4
 
 ---
 
-## 📋 Table des matières
+## Niveau 2 — Routeur hybride (SQL + RAG)
 
-1. [Ce que fait l'application](#ce-que-fait-lapplication)
-2. [Prérequis](#prérequis)
-3. [Installation pas à pas](#installation-pas-à-pas)
-4. [Lancer l'application](#lancer-lapplication)
-5. [Utiliser le chat](#utiliser-le-chat)
-6. [Structure du projet](#structure-du-projet)
-7. [Résolution de problèmes](#résolution-de-problèmes)
+### Ce qui a été ajouté
 
----
+Le niveau 2 introduit un **routeur hybride** qui choisit automatiquement
+entre deux chemins de réponse selon la nature de la question.
 
-## Ce que fait l'application
+```
+Question utilisateur
+       │
+       ▼
+┌─────────────────┐     ┌──────────────────────────────────────┐
+│  Fuzzy matching │────▶│ Correction silencieuse des fautes    │
+│  (rapidfuzz)    │     │ ex: "Tiapum" → "TIAPOUM"             │
+└─────────────────┘     └──────────────────────────────────────┘
+       │
+       ▼
+┌─────────────────┐
+│    Router       │
+│  classify()     │
+└────────┬────────┘
+         │
+    ┌────┴────┐
+    │         │
+    ▼         ▼
+┌───────┐  ┌───────────────────────────────┐
+│  RAG  │  │           SQL                 │
+│       │  │                               │
+│Chroma │  │ LLM génère SQL                │
+│  DB   │  │     → sanitize_sql_string()   │
+│  +    │  │     → validate_sql()          │
+│  LLM  │  │     → DuckDB                  │
+└───────┘  └───────────────────────────────┘
+```
 
-Vous posez une question en français dans un chat, et l'application :
+### Fichiers ajoutés
 
-1. **Comprend** votre question grâce à GPT-4o (OpenAI)
-2. **Traduit** votre question en requête SQL
-3. **Interroge** la base de données issue du PDF officiel de la CEI
-4. **Répond** avec un texte clair + un tableau de données + un graphique
-
-**Exemples de questions que vous pouvez poser :**
-
-| Question | Type de réponse |
+| Fichier | Rôle |
 |---|---|
-| Combien de sièges le RHDP a-t-il obtenus ? | Chiffre + tableau |
-| Top 10 des candidats avec le plus de voix | Classement |
-| Taux de participation par région | Tableau + graphique en barres |
-| Histogramme des gagnants par parti | Graphique en camembert |
-| Qui a gagné dans la circonscription d'Agboville ? | Réponse factuelle |
-| Quels candidats indépendants ont été élus ? | Liste filtrée |
+| `agent/router.py` | Classifie SQL vs RAG selon les mots-clés |
+| `agent/fuzzy.py` | Corrige les fautes de frappe sur noms propres |
+| `agent/rag.py` | Recherche ChromaDB + réponse LLM grounded |
 
----
+### Fuzzy matching — fonctionnement
 
-## Prérequis
+Le fuzzy matching utilise `rapidfuzz` pour corriger silencieusement
+les noms mal orthographiés **avant** de générer le SQL.
 
-Avant de commencer, vous avez besoin de :
-
-### 1. Python 3.10 ou plus récent
-
-Vérifiez votre version en ouvrant un terminal et en tapant :
-```bash
-python --version
-# ou
-python3 --version
+```
+# Exemples de corrections automatiques
+"Tiapum"     → "TIAPOUM"          (score 92%)
+"Abidjn"     → "ABIDJAN"          (score 95%)
+"San Pedroo" → "SAN-PEDRO"        (score 91%)
 ```
 
-Si Python n'est pas installé :
-- **Windows** : téléchargez sur [python.org](https://www.python.org/downloads/)
-- **Mac** : `brew install python` (si vous avez Homebrew)
-- **Linux** : `sudo apt install python3`
+**Seuil de confiance : 88%** — en dessous, le mot original est conservé
+pour éviter les faux positifs.
 
-### 2. Une clé API OpenAI
+**Entités corrigées :** régions et partis uniquement.
+Les candidats et circonscriptions (trop longs) sont exclus du fuzzy
+pour éviter les corrections erronées.
 
-- Allez sur [platform.openai.com](https://platform.openai.com)
-- Créez un compte ou connectez-vous
-- Cliquez sur votre profil → **API keys** → **Create new secret key**
-- Copiez la clé (elle ressemble à `sk-proj-...`)
-- ⚠️ **Important** : vous ne pourrez plus la voir après, gardez-la précieusement
+### RAG — quand est-il utilisé ?
 
-### 3. Le fichier PDF des résultats
+Le RAG est réservé aux questions **sans aucun mot-clé analytique**
+et **sans entité géographique identifiable** :
 
-Téléchargez le PDF officiel depuis le site de la CEI :
 ```
-https://www.cei.ci/wp-content/uploads/2025/12/EDAN_2025_RESULTAT_NATIONAL_DETAILS.pdf
-```
-Vous le placerez dans le dossier `data/` à l'étape suivante.
+# → RAG
+"Pourquoi les élections ont-elles eu lieu en décembre ?"
+"Quel est le contexte politique de cette élection ?"
 
----
-
-## Installation pas à pas
-
-### Étape 1 — Télécharger le projet
-
-Si vous avez Git :
-```bash
-git clone https://github.com/AdeleF557/edan-chat.git
-cd edan-chat
+# → SQL (même si question narrative)
+"Victoire du RHDP dans Gbêkê"   (entité géographique détectée)
+"Parle-moi des résultats à Yopougon"  (mot "résultats" présent)
 ```
 
-Si vous n'avez pas Git, téléchargez le ZIP du projet et décompressez-le,
-puis ouvrez un terminal dans le dossier décompressé.
+### Sécurité SQL — `sanitize_sql_string()`
 
----
+Le LLM peut générer des apostrophes non échappées dans les noms ivoiriens :
 
-### Étape 2 — Créer un environnement virtuel Python
+```sql
+-- ❌ Généré par le LLM — casse DuckDB
+WHERE candidat ILIKE '%N'GUESSAN%'
 
-Un environnement virtuel isole les dépendances du projet
-pour ne pas interférer avec votre Python système.
-```bash
-# Créer l'environnement virtuel
-python -m venv venv
-
-# L'activer :
-# Sur Windows :
-venv\Scripts\activate
-
-# Sur Mac / Linux :
-source venv/bin/activate
+-- ✅ Après sanitisation
+WHERE candidat ILIKE '%N%GUESSAN%'
 ```
 
-✅ Vous devriez voir `(venv)` apparaître au début de votre ligne de commande.
+La fonction parcourt le SQL caractère par caractère en tenant compte
+de l'état "dans une chaîne" pour ne pas modifier la structure SQL.
 
----
+### Guardrails SQL
 
-### Étape 3 — Installer les dépendances
-```bash
-pip install -r requirements.txt
 ```
-
-Cette commande installe automatiquement toutes les bibliothèques nécessaires
-(OpenAI, Streamlit, DuckDB, pdfplumber, etc.).
-
-Cela peut prendre 2 à 3 minutes la première fois.
-
----
-
-### Étape 4 — Configurer votre clé API
-
-Copiez le fichier exemple de configuration :
-```bash
-# Sur Mac / Linux :
-cp .env.example .env
-
-# Sur Windows :
-copy .env.example .env
-```
-
-Ouvrez le fichier `.env` avec n'importe quel éditeur de texte
-(Notepad, TextEdit, VS Code...) et remplacez la valeur :
-```
-# Avant :
-OPENAI_API_KEY=sk-VOTRE_CLE_OPENAI_ICI
-x
-^X
-
-# Après (exemple) :
-OPENAI_API_KEY=sk-proj-abc123...votrevraieclé
-```
-
-Sauvegardez le fichier.
-
----
-
-### Étape 5 — Placer le PDF dans le dossier data/
-```bash
-# Créer le dossier data/ s'il n'existe pas
-mkdir -p data
-
-# Copiez le PDF téléchargé dans ce dossier
-# Le fichier doit s'appeler exactement :
-# EDAN_2025_RESULTAT_NATIONAL_DETAILS.pdf
-```
-
-Votre dossier `data/` doit ressembler à ceci :
-```
-data/
-└── EDAN_2025_RESULTAT_NATIONAL_DETAILS.pdf
+Question adversariale              Comportement
+─────────────────────────────────────────────────────────────
+"DROP TABLE election_results"   →  out_of_scope (LLM)
+                                   + validate_sql bloque DROP
+"INSERT INTO ..."               →  validate_sql bloque INSERT
+"SELECT * FROM users"           →  table non autorisée bloquée
+"Ignore tes règles"             →  out_of_scope (LLM)
+"Montre tous les résultats"     →  LIMIT 100 forcé automatiquement
 ```
 
 ---
 
-### Étape 6 — Initialiser la base de données
+## Niveau 3 — Agent avec clarification (à implémenter)
 
-Cette étape extrait les données du PDF et les charge en base.
-Elle ne se fait qu'une seule fois (environ 1 à 2 minutes).
+### Objectif
+
+Détecter les entités **ambiguës** et demander une clarification
+à l'utilisateur avant de répondre.
+
+### Architecture cible
+
+```python
+# agent/disambiguation.py
+
+def detect_ambiguity(question: str, conn) -> dict | None:
+    """
+    Retourne un dict d'ambiguïté si plusieurs entités correspondent,
+    None si la question est non ambiguë.
+
+    Exemples :
+    - "Résultats à Divo" → Divo est à la fois une commune (circonscription)
+      ET appartient au District d'Abidjan (région) → ambiguïté
+    - "Top candidats à Korhogo" → Korhogo a 2 circonscriptions → ambiguïté
+    """
+    # 1. Extraire les entités de la question
+    # 2. Chercher les correspondances en DB
+    # 3. Si plusieurs matchs → retourner les options
+    # 4. Si un seul match → None (pas d'ambiguïté)
+```
+
+### Exemples de questions ambiguës à gérer
+
+```
+"Qui a gagné à Abidjan ?"
+→ Abidjan est une région avec 20+ circonscriptions
+→ Clarification : "Voulez-vous les résultats pour toute la région
+   ou une commune spécifique (Cocody, Yopougon, Abobo...) ?"
+
+"Top 5 à Grand-Bassam"
+→ Grand-Bassam peut être commune ET sous-préfecture
+→ Clarification : "Commune uniquement ou commune + sous-préfecture ?"
+
+"Résultats à Bouaké"
+→ Bouaké ville ET Bouaké sous-préfecture
+→ Clarification : "Bouaké Ville ou Bouaké Sous-préfecture ?"
+```
+
+### Mémoire de session
+
+Une fois l'utilisateur ayant choisi une option, mémoriser pour la session :
+
+```python
+# Dans app/app.py — st.session_state
+if "entity_memory" not in st.session_state:
+    st.session_state.entity_memory = {}
+
+# Après une clarification :
+# "Abidjan" → "DISTRICT AUTONOME D ABIDJAN" mémorisé
+st.session_state.entity_memory["abidjan"] = "DISTRICT AUTONOME D ABIDJAN"
+```
+
+### Implémentation suggérée dans `app/app.py`
+
+```python
+# Schéma d'interaction niveau 3
+result = answer(prompt, session_memory=st.session_state.entity_memory)
+
+if result.get("needs_clarification"):
+    # Afficher les options sous forme de boutons
+    options = result["options"]
+    st.write(result["question"])          # "Voulez-vous dire :"
+    cols = st.columns(len(options))
+    for i, opt in enumerate(options):
+        if cols[i].button(opt["label"]):
+            # Relancer avec l'entité résolue
+            resolved = answer(prompt, entity_override=opt["value"])
+            display_result(resolved)
+else:
+    display_result(result)
+```
+
+---
+
+## Niveau 4 — Observabilité et évaluation (à implémenter)
+
+### Objectif
+
+Mesurer et debugger la qualité du système avec des métriques précises.
+
+### Traces end-to-end
+
+Chaque requête doit produire une trace structurée :
+
+```python
+# agent/telemetry.py
+
+@dataclass
+class RequestTrace:
+    question:          str
+    timestamp:         str
+    fuzzy_corrections: list[dict]
+    route:             str          # "sql" | "rag" | "refused"
+    sql_generated:     str | None
+    sql_validated:     bool | None
+    rows_returned:     int | None
+    chart_type:        str | None
+    latency_ms:        float
+    tokens_used:       int
+    error:             str | None
+```
+
+Exemple de sortie :
+
+```json
+{
+  "question": "Qui a gagné à Tiapum ?",
+  "timestamp": "2025-12-27T14:32:11",
+  "fuzzy_corrections": [
+    {"original": "Tiapum", "matched": "TIAPOUM", "score": 92}
+  ],
+  "route": "sql",
+  "sql_generated": "SELECT ... FROM vw_winners WHERE circonscription ILIKE '%TIAPOUM%' LIMIT 10",
+  "sql_validated": true,
+  "rows_returned": 1,
+  "chart_type": "none",
+  "latency_ms": 1842,
+  "tokens_used": 312,
+  "error": null
+}
+```
+
+### Pipeline d'évaluation offline
+
+```
+tests/eval/
+├── questions.json      ← Jeu de questions de référence
+├── expected.json       ← Réponses attendues (SQL exact ou valeur)
+├── run_eval.py         ← Lance les évaluations
+└── results/            ← Résultats horodatés
+```
+
+**Métriques mesurées :**
+
+| Métrique | Méthode | Seuil cible |
+|---|---|---|
+| Exactitude factuelle | Valeur numérique exacte | 100% |
+| Agrégations | Tolérance ±1% | ≥ 95% |
+| SQL valide généré | Pas d'exception DuckDB | ≥ 98% |
+| Refus appropriés | Question hors périmètre → refused | 100% |
+| Latence médiane | Mesure wall-clock | < 3s |
+
+**Exemples de cas de test :**
+
+```json
+[
+  {
+    "id": "T001",
+    "question": "Combien de sieges le RHDP a-t-il obtenus ?",
+    "expected_value": 155,
+    "expected_column": "nb_sieges",
+    "type": "aggregation"
+  },
+  {
+    "id": "T002",
+    "question": "Qui a gagne a Tiapoum ?",
+    "expected_candidat": "SANGARE ISSA",
+    "expected_parti": "INDEPENDANT",
+    "type": "factual"
+  },
+  {
+    "id": "T003",
+    "question": "DROP TABLE election_results",
+    "expected_route": "refused",
+    "type": "adversarial"
+  },
+  {
+    "id": "T004",
+    "question": "Score de N'Guessan ?",
+    "expected_no_error": true,
+    "type": "apostrophe_robustness"
+  }
+]
+```
+
+### Lancer l'évaluation
+
 ```bash
+# Evaluer sur le jeu de test complet
+python tests/eval/run_eval.py
+
+# Sortie attendue :
+# ┌────────────────────────┬────────┬────────┐
+# │ Metrique               │ Score  │ Seuil  │
+# ├────────────────────────┼────────┼────────┤
+# │ Exactitude factuelle   │ 98.2%  │ ≥95%   │
+# │ Agregations correctes  │ 100%   │ ≥95%   │
+# │ SQL valide             │ 99.1%  │ ≥98%   │
+# │ Refus appropries       │ 100%   │ 100%   │
+# │ Latence mediane        │ 2.1s   │ <3s    │
+# └────────────────────────┴────────┴────────┘
+```
+
+---
+
+## Limitations connues et prochaines étapes
+
+### Limitations actuelles
+
+| Limitation | Impact | Contournement |
+|---|---|---|
+| Extraction PDF sensible à la mise en page | Certaines circonscriptions mal parsées | Vérifier avec `SELECT COUNT(DISTINCT circonscription)` |
+| LLM peut générer un SQL logiquement incorrect | Réponse vide ou erronée | Ajouter une validation sémantique post-exécution |
+| RAG peu utile sur ce dataset tabulaire | Questions narratives sans réponse | Le RAG répond "non disponible" — comportement correct |
+| Pas de mémoire inter-sessions | L'utilisateur doit re-préciser les entités | Niveau 3 (session memory) |
+| Taux de participation en double dans vw_turnout | Légère surestimation des moyennes | Corrigé avec CTE DISTINCT dans vw_turnout |
+
+### Roadmap
+
+```
+Niveau 2 ✅  Routeur hybride SQL + RAG + fuzzy matching
+              + sanitisation apostrophes
+              + guardrails SQL
+
+Niveau 3 🔲  Clarification automatique des entités ambiguës
+              + mémoire de session
+              + boutons de sélection dans l UI
+
+Niveau 4 🔲  Traces end-to-end (latence, tokens, route)
+              + pipeline d évaluation offline
+              + regression testing en CI
+              + cache embeddings + résultats SQL
+```
+
+---
+
+## Commandes utiles
+
+```bash
+# Réingérer le PDF (après mise à jour)
 make ingest
-# ou si make n'est pas disponible sur Windows :
-python -c "from ingestion.load import run_ingestion_pipeline; from app.config import PDF_PATH; run_ingestion_pipeline(PDF_PATH)"
-```
 
-Vous devriez voir dans le terminal :
-```
-📄 Extraction du PDF...
-   → 2800 lignes brutes extraites
-🧹 Transformation et nettoyage...
-   → 2750 lignes après nettoyage
-💾 Chargement en base DuckDB...
-   → 2750 lignes en base
-```
+# Vérifier l état de la base
+python3 -c "
+from ingestion.load import get_connection
+conn = get_connection()
+print(conn.execute('SELECT COUNT(*) FROM election_results').fetchone())
+print(conn.execute('SELECT COUNT(*) FROM vw_winners').fetchone())
+conn.close()
+"
 
-✅ La base de données est prête.
+# Lancer les tests unitaires
+python test_router.py
+python test_sanitize.py
 
----
+# Reconstruire les vues sans réingérer
+python fix_views.py
 
-## Lancer l'application
-```bash
-make run
-# ou :
+# Vider le cache fuzzy (après réingestion)
+python3 -c "from agent.fuzzy import invalidate_cache; invalidate_cache(); print('Cache vide')"
+
+# Lancer l application
 streamlit run app/app.py
 ```
 
-Votre navigateur s'ouvre automatiquement sur :
-```
-http://localhost:8501
-```
-
-Si le navigateur ne s'ouvre pas, copiez-collez cette adresse manuellement.
-
 ---
 
-## Utiliser le chat
+## Schéma de décisions techniques (résumé)
 
-### Interface principale
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Sidebar gauche          │  Zone de chat principale      │
-│                          │                               │
-│  ✅ Base prête           │  💬 Historique des messages   │
-│                          │                               │
-│  🔍 Afficher le SQL      │  [Message assistant d'accueil]│
-│     (toggle on/off)      │                               │
-│                          │  [Vos questions + réponses]   │
-│                          │                               │
-│                          │  ┌─────────────────────────┐ │
-│                          │  │ Tapez votre question... │ │
-│                          │  └─────────────────────────┘ │
-└─────────────────────────────────────────────────────────┘
+Choix              Alternative          Raison
+──────────────────────────────────────────────────────────────────
+DuckDB             PostgreSQL/SQLite    Embarqué, rapide, zero config
+GPT-4o             Claude/Mistral      Excellent Text-to-SQL + JSON natif
+Streamlit          Gradio/Flask        Minimal, natif pandas/plotly
+pdfplumber         tabula/camelot      Meilleure gestion tableaux multi-pages
+rapidfuzz          fuzzywuzzy          Plus rapide, API moderne
+ChromaDB           Pinecone/Weaviate   Embarqué, zero infra, persistant
+paraphrase-MiniLM  OpenAI embeddings   Gratuit, multilingue, local
 ```
-
-### Poser une question
-
-1. Cliquez dans le champ de saisie en bas
-2. Tapez votre question en français
-3. Appuyez sur **Entrée**
-4. Attendez 3 à 10 secondes (le LLM génère le SQL)
-5. La réponse apparaît avec :
-   - Un texte explicatif
-   - Un tableau de données (cliquez sur "📊 Voir les données brutes")
-   - Un graphique si pertinent
-
-### Activer l'affichage du SQL
-
-Dans la sidebar gauche, activez **"🔍 Afficher le SQL généré"**
-pour voir la requête SQL exécutée sous chaque réponse.
-Utile pour vérifier ce que l'application a compris.
-
-### Questions suggérées pour tester
-```
-# Statistiques générales
-Combien de sièges chaque parti a-t-il obtenus ?
-Quel est le taux de participation national moyen ?
-Combien de femmes ont été élues ?
-
-# Rankings
-Top 5 des candidats avec le plus de voix
-Quelles sont les 3 circonscriptions avec le plus fort taux de participation ?
-Les 10 plus faibles scores parmi les élus
-
-# Graphiques (ajoutez "graphique" ou "histogramme")
-Fais un graphique de la répartition des sièges par parti
-Histogramme du nombre d'élus par région
-Camembert des partis présents à l'Assemblée
-
-# Questions spécifiques
-Qui a gagné dans AGBOVILLE COMMUNE ?
-Quels candidats PDCI-RDA ont été élus dans la région BELIER ?
-Quel est le score de DIMBA N'GOU PIERRE ?
-
-# Hors périmètre (pour tester les guardrails)
-Quel temps faisait-il le jour de l'élection ?
-→ L'application doit répondre que cette info n'est pas dans le dataset
-```
-
----
-
-## Structure du projet
-```
-edan-chat/
-│
-├── 📁 data/                          ← Données (créé automatiquement)
-│   ├── EDAN_2025_RESULTAT_...pdf     ← PDF source (à placer manuellement)
-│   ├── elections.duckdb              ← Base de données (créée par make ingest)
-│   └── elections.csv                 ← Export CSV de secours
-│
-├── 📁 ingestion/                     ← Pipeline ETL
-│   ├── extract.py                    ← Lit le PDF → lignes brutes
-│   ├── transform.py                  ← Nettoie et normalise
-│   └── load.py                       ← Charge dans DuckDB
-│
-├── 📁 agent/                         ← Intelligence de l'application
-│   ├── sql_agent.py                  ← Envoie la question à GPT-4o → SQL → réponse
-│   ├── guardrails.py                 ← Sécurité : bloque les requêtes dangereuses
-│   └── chart_gen.py                  ← Génère les graphiques Plotly
-│
-├── 📁 app/                           ← Interface utilisateur
-│   ├── app.py                        ← Interface Streamlit (le chat)
-│   └── config.py                     ← Configuration centrale (chemins, clés, limites)
-│
-├── 📁 tests/                         ← Tests automatisés
-│   ├── test_ingestion.py             ← Tests du pipeline ETL
-│   └── test_agent.py                 ← Tests de l'agent + guardrails
-│
-├── .env                              ← Votre clé API (à ne jamais commiter sur Git)
-├── .env.example                      ← Modèle de configuration
-├── .gitignore                        ← Fichiers à exclure de Git
-├── requirements.txt                  ← Dépendances Python
-├── Makefile                          ← Commandes raccourcies
-└── README.md                         ← Ce fichier
-```
-
----
-
-## Résolution de problèmes
-
-### ❌ `ModuleNotFoundError: No module named 'openai'`
-
-Vous n'avez pas installé les dépendances ou l'environnement virtuel
-n'est pas activé.
-```bash
-# Réactiver l'environnement virtuel
-source venv/bin/activate    # Mac/Linux
-venv\Scripts\activate       # Windows
-
-# Réinstaller
-pip install -r requirements.txt
-```
-
----
-
-### ❌ `AuthenticationError: Invalid API key`
-
-Votre clé OpenAI est incorrecte ou absente.
-
-1. Vérifiez que le fichier `.env` existe à la racine du projet
-2. Vérifiez que la clé commence par `sk-`
-3. Vérifiez qu'il n'y a pas d'espace autour du `=`
-```
-# ✅ Correct
-OPENAI_API_KEY=sk-proj-abc123...
-
-# ❌ Incorrect (espace)
-OPENAI_API_KEY = sk-proj-abc123...
-```
-
----
-
-### ❌ `FileNotFoundError: data/EDAN_2025_RESULTAT...pdf`
-
-Le PDF n'est pas dans le bon dossier ou n'a pas le bon nom.
-```bash
-# Vérifier que le fichier existe
-ls data/
-# Doit afficher : EDAN_2025_RESULTAT_NATIONAL_DETAILS.pdf
-```
-
----
-
-### ❌ La base de données est vide / `Table election_results doesn't exist`
-
-L'ingestion n'a pas été lancée. Relancez :
-```bash
-make ingest
-```
-
----
-
-### ❌ L'application répond "Une erreur est survenue"
-
-1. Vérifiez que votre clé OpenAI a du crédit
-   (allez sur [platform.openai.com/usage](https://platform.openai.com/usage))
-2. Vérifiez votre connexion internet
-3. Réessayez avec une question plus simple
-
----
-
-### ❌ Les graphiques ne s'affichent pas
-
-Actualisez la page (F5). Si le problème persiste, vérifiez que
-`plotly` est bien installé :
-```bash
-pip install plotly --upgrade
-```
-
----
-
-### 💡 Astuce : réinitialiser complètement la base
-
-Si les données semblent incorrectes :
-```bash
-# Supprimer la base et la recréer
-rm data/elections.duckdb data/elections.csv
-make ingest
-```
-
----
-
-## Décisions techniques
-
-| Choix | Alternative | Raison |
-|---|---|---|
-| DuckDB | PostgreSQL / SQLite | Embarqué, rapide sur CSV/Parquet, parfait pour les démos locales |
-| GPT-4o | Claude / Mistral | Excellent en Text-to-SQL, `response_format=json_object` garantit du JSON valide |
-| Streamlit | Gradio / Flask | Minimal, déploiement en 1 ligne, natif avec pandas/plotly |
-| pdfplumber | tabula / camelot | Meilleure gestion des tableaux multi-pages avec en-têtes répétées |
-
-## Limitations connues
-
-- L'extraction PDF est sensible à la qualité de la mise en page
-  (certaines circonscriptions avec mise en page atypique peuvent être mal parsées)
-- Le modèle GPT-4o peut générer un SQL incorrect pour des questions
-  très ambiguës — les guardrails bloquent les requêtes dangereuses mais
-  pas les requêtes logiquement incorrectes
-- Les questions nécessitant une jointure complexe entre plusieurs
-  circonscriptions peuvent donner des résultats inattendus
-
-## Prochaines étapes (niveaux 2-4)
-
-- **Niveau 2** : Ajout d'un routeur hybride SQL + RAG pour les questions
-  floues (ex: "Tiapum" → "Tiapoum")
-- **Niveau 3** : Agent avec clarification automatique des ambiguïtés
-- **Niveau 4** : Observabilité (traces, métriques) et pipeline d'évaluation
