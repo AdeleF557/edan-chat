@@ -60,16 +60,14 @@ if "messages" not in st.session_state:
         "chart_type": None,
         "question":   "",
         "route":      None,
-        "citations":  [],
+        "ambiguous":         False,
+        "ambiguity_options": [],
+        "citations":         [],
     })
 
+# Session context pour Level 3 (entités résolues persistent)
 if "session_context" not in st.session_state:
     st.session_state.session_context = {}
-
-# État séparé pour l'ambiguïté en attente de résolution
-if "pending_ambiguity" not in st.session_state:
-    st.session_state.pending_ambiguity = None
-# {"options": [...], "question": "..."}
 
 
 def check_db():
@@ -85,7 +83,10 @@ def check_db():
 
 
 def _render_sql_sources(df):
-    """Affiche les numéros de pages PDF comme citations pour les réponses SQL."""
+    """
+    Affiche les numéros de pages PDF comme citations pour les réponses SQL.
+    Utilise la colonne 'page' si elle est présente dans le DataFrame.
+    """
     if df is None or df.empty:
         return
     if "page" not in df.columns:
@@ -104,16 +105,45 @@ def _render_sql_sources(df):
 
 
 def _update_session_context(result: dict):
+    """
+    Met à jour le contexte de session avec les entités résolues
+    par le fuzzy matching ET depuis le dernier résultat SQL.
+    """
+    # 1. Entités corrigées par le fuzzy
     corrections = result.get("corrections", [])
     for c in corrections:
         if c.get("entity_type") in ("region", "circonscription", "parti"):
             st.session_state.session_context[c["entity_type"]] = c["matched"]
 
+    df = result.get("dataframe")
 
-def render_result(msg, show_sql=False, show_ambiguity_buttons=False):
+    # 2. Région unique détectée dans le résultat SQL → mémoriser
+    if df is not None and not df.empty and "region" in df.columns:
+        regions = df["region"].dropna().unique().tolist()
+        if len(regions) == 1:
+            st.session_state.session_context["region"] = regions[0]
+
+    # 3. Parti unique détecté dans le résultat SQL → mémoriser comme dernier_parti
+    if df is not None and not df.empty and "parti" in df.columns:
+        partis = df["parti"].dropna().unique().tolist()
+        if len(partis) == 1:
+            st.session_state.session_context["dernier_parti"] = partis[0]
+
+    # 4. Circonscription unique → mémoriser
+    if df is not None and not df.empty and "circonscription" in df.columns:
+        circos = df["circonscription"].dropna().unique().tolist()
+        if len(circos) == 1:
+            st.session_state.session_context["circonscription"] = circos[0]
+
+def render_result(msg, show_sql=False):
     """
-    Affiche un message assistant.
-    show_ambiguity_buttons=True uniquement pour le dernier message actif.
+    Affiche un message assistant avec :
+    - badge de route (SQL / RAG)
+    - texte explicatif
+    - tableau + sources PDF (SQL) ou citations page (RAG)
+    - boutons de clarification si ambiguïté (Level 3)
+    - graphique
+    - SQL optionnel
     """
     route = msg.get("route")
     if route in ("sql", "rag_fallback", "rag_exec_fallback"):
@@ -123,18 +153,24 @@ def render_result(msg, show_sql=False, show_ambiguity_buttons=False):
         st.markdown('<span class="route-badge route-rag">🔍 RAG</span>',
                     unsafe_allow_html=True)
 
+    # Texte explicatif
     st.markdown(msg["content"])
 
+    # ── Tableau + sources ──────────────────────────────────────────
     df = msg.get("dataframe")
     if df is not None and not df.empty:
+        # Colonnes à masquer dans l'affichage (internes)
         cols_to_hide = {"page", "search_circo", "id"}
         df_display = df[[c for c in df.columns if c not in cols_to_hide]].copy()
         for col in df_display.select_dtypes(include=["float64"]).columns:
             df_display[col] = df_display[col].round(2)
 
         st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+        # Sources PDF depuis la colonne page (SQL)
         _render_sql_sources(df)
 
+        # ── Graphique ──────────────────────────────────────────────
         chart_type = msg.get("chart_type")
         if chart_type and chart_type != "none":
             if "avg_taux_participation" in df.columns:
@@ -144,32 +180,37 @@ def render_result(msg, show_sql=False, show_ambiguity_buttons=False):
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
 
-    # Boutons d'ambiguïté : uniquement si demandé explicitement (dernier message actif)
-    if show_ambiguity_buttons and st.session_state.pending_ambiguity:
-        options = st.session_state.pending_ambiguity["options"]
+    # ── Boutons de clarification Level 3 ──────────────────────────
+    if msg.get("ambiguous") and msg.get("ambiguity_options"):
+        options = msg["ambiguity_options"]
         st.markdown("**Précisez la circonscription souhaitée :**")
+        # Afficher max 6 options en grille de 2 colonnes
         pairs = [options[i:i+2] for i in range(0, min(len(options), 6), 2)]
-        for row_idx, pair in enumerate(pairs):
+        for pair in pairs:
             cols = st.columns(len(pair))
-            for col_idx, (col, option) in enumerate(zip(cols, pair)):
-                btn_key = f"amb_active_{row_idx}_{col_idx}"
+            for col, option in zip(cols, pair):
+                # Clé unique basée sur le contenu du message
+                btn_key = f"amb_{hash(msg['content'])}_{option[:15]}"
                 with col:
                     if st.button(
                         option[:50] + ("…" if len(option) > 50 else ""),
                         key=btn_key,
                         use_container_width=True,
                     ):
+                        # Mémoriser le choix en session
                         st.session_state.session_context["circonscription"] = option
-                        st.session_state.pending_ambiguity = None
+                        # Injecter la question précisée dans le chat
                         new_q = f"Résultats pour la circonscription : {option}"
                         st.session_state.messages.append({
                             "role": "user", "content": new_q,
                             "dataframe": None, "sql": None,
                             "chart_type": None, "question": new_q,
-                            "route": None, "citations": [],
+                            "route": None, "ambiguous": False,
+                            "ambiguity_options": [], "citations": [],
                         })
                         st.rerun()
 
+    # SQL optionnel
     if show_sql and msg.get("sql"):
         with st.expander("🔍 SQL exécuté"):
             st.code(msg["sql"], language="sql")
@@ -186,6 +227,7 @@ with st.sidebar:
     st.divider()
     show_sql = st.toggle("Afficher le SQL généré", value=False)
 
+    # Afficher le contexte de session si non vide
     if st.session_state.session_context:
         st.divider()
         st.caption("🧠 Contexte mémorisé")
@@ -202,34 +244,16 @@ with st.sidebar:
 # ── Titre ─────────────────────────────────────────────────────────────────────
 st.title("💬 Chat — Résultats Elections EDAN 2025")
 
-# ── Historique (sans boutons d'ambiguïté) ────────────────────────────────────
+# ── Historique ────────────────────────────────────────────────────────────────
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        render_result(msg, show_sql=show_sql, show_ambiguity_buttons=False)
-
-# ── Boutons d'ambiguïté actifs (hors historique, toujours visibles) ──────────
-if st.session_state.pending_ambiguity:
-    with st.chat_message("assistant"):
-        render_result(
-            {
-                "role": "assistant",
-                "content": "**Précisez la circonscription souhaitée :**",
-                "dataframe": None, "sql": None,
-                "chart_type": None, "question": "",
-                "route": None, "citations": [],
-            },
-            show_sql=False,
-            show_ambiguity_buttons=True,
-        )
+        render_result(msg, show_sql=show_sql)
 
 # ── Input utilisateur ─────────────────────────────────────────────────────────
 if prompt := st.chat_input("Posez votre question sur les élections..."):
     if not check_db():
         st.error("Lancez d'abord : `make ingest`")
         st.stop()
-
-    # Annuler une ambiguïté en attente si l'utilisateur pose une nouvelle question
-    st.session_state.pending_ambiguity = None
 
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -238,7 +262,8 @@ if prompt := st.chat_input("Posez votre question sur les élections..."):
         "role": "user", "content": prompt,
         "dataframe": None, "sql": None,
         "chart_type": None, "question": prompt,
-        "route": None, "citations": [],
+        "route": None, "ambiguous": False,
+        "ambiguity_options": [], "citations": [],
     })
 
     with st.chat_message("assistant"):
@@ -249,34 +274,23 @@ if prompt := st.chat_input("Posez votre question sur les élections..."):
                 session_context=st.session_state.session_context,
             )
 
+        # Mettre à jour le contexte de session avec les entités résolues
         _update_session_context(result)
 
         assistant_msg = {
-            "role":        "assistant",
-            "content":     result["text"],
-            "dataframe":   result.get("dataframe"),
-            "sql":         result.get("sql"),
-            "chart_type":  result.get("chart_type"),
-            "question":    prompt,
-            "route":       result.get("route"),
-            "citations":   result.get("citations", []),
-            "corrections": result.get("corrections", []),
+            "role":              "assistant",
+            "content":           result["text"],
+            "dataframe":         result.get("dataframe"),
+            "sql":               result.get("sql"),
+            "chart_type":        result.get("chart_type"),
+            "question":          prompt,
+            "route":             result.get("route"),
+            "ambiguous":         result.get("ambiguous", False),
+            "ambiguity_options": result.get("ambiguity_options", []),
+            "citations":         result.get("citations", []),
+            "corrections":       result.get("corrections", []),
         }
 
-        # Stocker l'ambiguïté dans l'état séparé (pas dans le message)
-        is_ambiguous      = result.get("ambiguous", False)
-        ambiguity_options = result.get("ambiguity_options", [])
-
-        if is_ambiguous and ambiguity_options:
-            st.session_state.pending_ambiguity = {
-                "options":  ambiguity_options,
-                "question": prompt,
-            }
-
-        render_result(assistant_msg, show_sql=show_sql, show_ambiguity_buttons=False)
+        render_result(assistant_msg, show_sql=show_sql)
 
     st.session_state.messages.append(assistant_msg)
-
-    # Si ambiguïté détectée, rerun pour afficher les boutons actifs proprement
-    if st.session_state.pending_ambiguity:
-        st.rerun()

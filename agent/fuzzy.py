@@ -35,11 +35,13 @@ def load_stop_words():
         "tau", "taux", "partcipation", "participation",
         "simona", "score", "info", "information",
         "parler", "montre", "donnez",
-        # AJOUTS
         "peux", "tu", "me", "nous", "vous",
         "ete", "elue", "obtenus", "stp", "svp",
         "merci", "bonjour", "salut", "aide", "aider",
         "parler", "remporte", "gagne",
+        # AJOUT connecteurs
+        "abord", "dabord", "ensuite", "puis", "enfin",
+        "premierement", "deuxiemement", "suite", "dabord",
     }
 
     return nltk_words | domain_words
@@ -57,6 +59,9 @@ NEVER_CORRECT = {
     # Prépositions longues
     "dans", "pour", "avec", "entre", "vers", "chez",
     "depuis", "jusque", "avant", "apres",
+    # Connecteurs temporels / séquentiels
+    "abord", "dabord", "ensuite", "puis", "enfin",
+    "premierement", "deuxiemement", "suite",
     # Verbes courants
     "dit", "dis", "fait", "sait", "voit", "veut", "peut",
     "peux", "puis", "pouvez", "voulez", "veux",
@@ -181,9 +186,10 @@ def is_stop_phrase(phrase: str, window_size: int = 1) -> bool:
         "resulats", "resultat", "score", "quel", "quelle",
         "simona", "simon",
         "le", "la", "les", "du", "de", "des",
-        # AJOUTS
         "tu", "me", "je", "nous", "vous", "a", "ete",
         "qui", "peux", "peut",
+        # AJOUT connecteurs
+        "abord", "dabord", "ensuite", "puis", "enfin", "suite",
     }
     if words[0] in first_word_stops:
         return True
@@ -347,9 +353,45 @@ def should_apply_fuzzy(question: str) -> bool:
     if analytical_only.match(q_clean):
         return False
 
+    hard_stops = {
+        "la", "le", "les", "de", "du", "des", "un", "une",
+        "en", "au", "aux", "et", "ou", "ni", "si", "car",
+        "par", "sur", "sous", "dans", "avec", "sans", "pour",
+        "pas", "non", "oui",
+        "je", "tu", "il", "elle", "nous", "vous", "ils", "elles",
+        "me", "te", "se", "lui", "leur", "moi", "toi", "soi",
+        "mon", "ton", "son", "mes", "tes", "ses",
+        "peux", "peut", "puis", "pouvez", "voulez", "veux",
+        "est", "sont", "ont", "avez", "avons", "avoir", "etre",
+        "dit", "dis", "fait", "sait", "voit", "veut",
+        "dire", "faire", "savoir", "voir", "vouloir",
+        "parler", "parle", "montrer", "montre", "donner", "donne",
+        "expliquer", "explique", "raconter", "raconte",
+        "qui", "que", "quoi", "dont", "comment", "pourquoi",
+        "quand", "combien", "quel", "quelle", "quels", "quelles",
+        "bien", "mal", "tres", "peu", "trop", "plus", "moins",
+        "tout", "tous", "rien", "aussi", "encore", "deja",
+        "stp", "svp", "merci", "bonjour", "salut",
+        "region", "victoire", "defaite", "vainqueur", "gagnant",
+        "resultat", "score", "taux", "siege", "parti", "candidat",
+        "election", "vote", "voix", "elu", "elue", "elus",
+        "info", "source", "page",
+        "peux", "parler", "ete", "obtenus", "remporte", "gagne",
+        "aide", "aider", "liste", "indique", "affiche",
+        "tau", "partcipation", "resulats", "simona", "simon",
+        # AJOUT connecteurs
+        "abord", "dabord", "ensuite", "puis", "enfin",
+        "premierement", "suite",
+    }
+
+    def norm(t):
+        nfkd = unicodedata.normalize("NFKD", t)
+        return "".join(c for c in nfkd if not unicodedata.combining(c)).lower()
+
+    words = q_clean.split()
+
     return any(
-        len(w) >= 5
-        and normalize(w) not in STOP_WORDS
-        and normalize(w) not in NEVER_CORRECT
-        for w in q_clean.split()
+        len(norm(w)) >= 5
+        and norm(w) not in hard_stops
+        for w in words
     )

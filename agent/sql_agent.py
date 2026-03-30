@@ -105,8 +105,11 @@ Si un lieu correspond a plusieurs circonscriptions, retourne-les toutes et
 mets ambiguous=true avec une note dans ambiguity_note.
 
 MEMOIRE DE CONVERSATION :
-Utilise l historique pour resoudre les references implicites
-("et pour le PDCI ?", "dans cette region ?").
+Utilise l historique pour resoudre les references implicites.
+- "et pour le PDCI ?" → meme region/circo que precedemment, filtre sur parti PDCI-RDA
+- "dans cette region ?" → utilise la region du contexte de session
+- "et lui ?" / "et pour eux ?" → utilise le dernier_parti du contexte
+- Si "dernier_parti" est dans le contexte et la question mentionne un autre parti, utilise ce nouveau parti
 
 Reponds en JSON strict :
 {
@@ -141,6 +144,13 @@ def _build_messages(
         ctx_lines = ["CONTEXTE DE SESSION (entités confirmées par l'utilisateur) :"]
         for k, v in session_context.items():
             ctx_lines.append(f"  - {k} = {v}")
+        ctx_lines.append("")
+        ctx_lines.append("RÈGLES DE RÉSOLUTION DES RÉFÉRENCES IMPLICITES :")
+        ctx_lines.append("  - 'et pour le PDCI ?' → même région/circo que précédemment, filtre parti PDCI-RDA")
+        ctx_lines.append("  - 'et pour le RHDP ?' → même région/circo, filtre parti RHDP")
+        ctx_lines.append("  - 'dans cette région ?' → utilise la region du contexte")
+        ctx_lines.append("  - 'et lui ?' / 'et pour eux ?' → utilise le dernier_parti du contexte")
+        ctx_lines.append("  - Si 'dernier_parti' est défini, l'utiliser comme filtre par défaut")
         ctx_lines.append("Utilise ces valeurs pour résoudre les références implicites.")
         messages.append({"role": "system", "content": "\n".join(ctx_lines)})
 
@@ -281,7 +291,7 @@ def answer(
                 rag_result["text"] += _format_corrections(corrections)
             return rag_result
 
-        # SQL retourne 0 résultats — pas de fallback RAG pour les questions analytiques
+        # SQL retourne 0 résultats
         if df.empty:
             not_found_text = (
                 f"Cette information n'est pas disponible dans le dataset.\n\n"

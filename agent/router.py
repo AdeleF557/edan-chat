@@ -31,7 +31,9 @@ RAG_KEYWORDS = [
     "comment", "pourquoi", "explique",
     "a propos", "information sur",
     "que sais-tu", "connais-tu",
-    "sur quelle page",
+    "sur quelle page", "quelle page",
+    "numero de page", "dans quelle page",
+    "ou se trouve", "trouve sur",
     "source", "page",
 ]
 
@@ -67,10 +69,18 @@ AGGREGATION_PATTERNS = [
     r"ete\s+elu",
     r"victoire.{0,20}(du|de|des|d[eu]|a |dans )",
     r"(parler|parle).{0,10}(de|du|de la|des).{0,30}(victoire|resultat|score)",
-    # AJOUT : "qui a gagné dans/à/en"
     r"qui\s+a\s+gagne",
     r"dans\s+la\s+region",
     r"region\s+du\s+\w+",
+]
+
+# Patterns qui forcent le routing vers RAG (questions de localisation PDF)
+PAGE_PATTERNS = [
+    r"(quelle|sur\s+quelle|numero\s+de)\s+page",
+    r"ou\s+(se\s+trouve|trouver)",
+    r"dans\s+quelle\s+page",
+    r"(page|source).{0,20}(resultat|score|region|circo)",
+    r"sur\s+quelle\s+page",
 ]
 
 
@@ -83,6 +93,11 @@ def _normalize_for_routing(text: str) -> str:
 
 def classify(question: str) -> str:
     q_norm = _normalize_for_routing(question)
+
+    # ── AJOUT : court-circuit RAG pour les questions de localisation PDF ──
+    for pattern in PAGE_PATTERNS:
+        if re.search(pattern, q_norm):
+            return "rag"
 
     for pattern in AGGREGATION_PATTERNS:
         if re.search(pattern, q_norm):
@@ -117,11 +132,6 @@ def classify(question: str) -> str:
 
 
 def should_apply_fuzzy(question: str) -> bool:
-    """
-    Applique le fuzzy uniquement si la question contient un mot
-    qui ressemble à un nom propre géographique ou de parti.
-    Exclut explicitement les séquences conversationnelles.
-    """
     import unicodedata
 
     def norm(t):
@@ -130,7 +140,6 @@ def should_apply_fuzzy(question: str) -> bool:
 
     q_clean = re.sub(r"[?!.,;:«»\"]", "", question).strip()
 
-    # Court-circuit sur les questions purement analytiques
     analytical_only = re.compile(
         r"^(combien|taux|participation|top\s*\d|histogramme|"
         r"classement|repartition|nombre|total|moyenne|"
@@ -140,40 +149,35 @@ def should_apply_fuzzy(question: str) -> bool:
     if analytical_only.match(q_clean):
         return False
 
-    # Mots à ne JAMAIS soumettre au fuzzy
     hard_stops = {
-        # Articles / prépositions
         "la", "le", "les", "de", "du", "des", "un", "une",
         "en", "au", "aux", "et", "ou", "ni", "si", "car",
         "par", "sur", "sous", "dans", "avec", "sans", "pour",
         "pas", "non", "oui",
-        # Pronoms
         "je", "tu", "il", "elle", "nous", "vous", "ils", "elles",
         "me", "te", "se", "lui", "leur", "moi", "toi", "soi",
         "mon", "ton", "son", "mes", "tes", "ses",
-        # Verbes conversationnels
         "peux", "peut", "puis", "pouvez", "voulez", "veux",
         "est", "sont", "ont", "avez", "avons", "avoir", "etre",
         "dit", "dis", "fait", "sait", "voit", "veut",
         "dire", "faire", "savoir", "voir", "vouloir",
         "parler", "parle", "montrer", "montre", "donner", "donne",
         "expliquer", "explique", "raconter", "raconte",
-        # Mots de question
         "qui", "que", "quoi", "dont", "comment", "pourquoi",
         "quand", "combien", "quel", "quelle", "quels", "quelles",
-        # Adverbes / connecteurs
         "bien", "mal", "tres", "peu", "trop", "plus", "moins",
         "tout", "tous", "rien", "aussi", "encore", "deja",
         "stp", "svp", "merci", "bonjour", "salut",
-        # Mots du domaine (non-entités)
         "region", "victoire", "defaite", "vainqueur", "gagnant",
         "resultat", "score", "taux", "siege", "parti", "candidat",
         "election", "vote", "voix", "elu", "elue", "elus",
         "info", "source", "page",
-        # Mots qui causaient des faux positifs
         "peux", "parler", "ete", "obtenus", "remporte", "gagne",
         "aide", "aider", "liste", "indique", "affiche",
         "tau", "partcipation", "resulats", "simona", "simon",
+        # AJOUT connecteurs
+        "abord", "dabord", "ensuite", "puis", "enfin",
+        "premierement", "suite",
     }
 
     words = q_clean.split()
