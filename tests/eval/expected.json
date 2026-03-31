@@ -1,0 +1,74 @@
+{
+  "T001": {
+    "type": "value",
+    "column": "nb_sieges",
+    "value": 155,
+    "tolerance": 0
+  },
+  "T002": {
+    "type": "df_contains",
+    "candidat": "SANGARE ISSA",
+    "parti": "INDEPENDANT"
+  },
+  "T003": {
+    "type": "df_contains",
+    "candidat": "SANGARE ISSA",
+    "parti": "INDEPENDANT"
+  },
+  "T004": {
+    "type": "value",
+    "column": "nb_sieges",
+    "value": 25,
+    "tolerance": 0
+  },
+  "T005": {
+    "type": "route",
+    "route": "sql",
+    "no_error": true
+  },
+  "T006": {
+    "type": "df_contains_region",
+    "region": "TCHOLOGO"
+  },
+  "T007": {
+    "type": "min_rows",
+    "min_rows": 5,
+    "no_error": true
+  },
+  "T008": {
+    "type": "route",
+    "route": "refused"
+  },
+  "T009": {
+    "type": "route",
+    "route": "refused"
+  },
+  "T010": {
+    "type": "ambiguous",
+    "ambiguous": true
+  },
+  "T011": {
+    "type": "no_error",
+    "no_error": true
+  },
+  "T012": {
+    "type": "route",
+    "route": "refused"
+  },
+  "T013": {
+    "type": "value",
+    "column": "nb_circonscriptions",
+    "value": 204,
+    "tolerance": 5
+  },
+  "T014": {
+    "type": "min_rows",
+    "min_rows": 10,
+    "no_error": true
+  },
+  "T015": {
+    "type": "chart",
+    "chart_type": "bar",
+    "no_error": true
+  }
+}

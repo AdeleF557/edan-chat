@@ -1,4 +1,5 @@
 import json
+import time
 import pandas as pd
 from openai import OpenAI
 from app.config import OPENAI_API_KEY, LLM_MODEL, SQL_MAX_ROWS
@@ -9,6 +10,8 @@ from agent.guardrails import (
 from agent.router import classify, should_apply_fuzzy
 from agent.fuzzy import extract_and_correct_entities
 from agent.rag import answer_with_rag
+from agent.disambiguation import detect_ambiguity
+from agent.telemetry import RequestTrace, save_trace, now_iso
 from ingestion.load import get_connection
 
 _client = None
@@ -169,7 +172,8 @@ def classify_and_generate_sql(
     question: str,
     history: list | None = None,
     session_context: dict | None = None,
-) -> dict:
+) -> tuple[dict, int]:
+    """Retourne (llm_output_dict, tokens_used)."""
     messages = _build_messages(question, history, session_context)
     response = get_client().chat.completions.create(
         model=LLM_MODEL,
@@ -178,7 +182,9 @@ def classify_and_generate_sql(
         temperature=0,
         max_tokens=1200,
     )
-    return json.loads(response.choices[0].message.content.strip())
+    tokens_used = response.usage.total_tokens if response.usage else 0
+    parsed = json.loads(response.choices[0].message.content.strip())
+    return parsed, tokens_used
 
 
 def execute_query(sql: str, conn) -> pd.DataFrame:
@@ -192,6 +198,35 @@ def _format_corrections(corrections: list) -> str:
     ) + "_"
 
 
+def _emit_trace(
+    *,
+    question: str,
+    t_start: float,
+    corrections: list,
+    route: str,
+    sql: str | None,
+    sql_validated: bool | None,
+    rows: int | None,
+    chart_type: str | None,
+    tokens_used: int,
+    error: str | None,
+) -> None:
+    """Construit et sauvegarde un RequestTrace (non-bloquant)."""
+    save_trace(RequestTrace(
+        question=question,
+        timestamp=now_iso(),
+        fuzzy_corrections=corrections,
+        route=route,
+        sql_generated=sql,
+        sql_validated=sql_validated,
+        rows_returned=rows,
+        chart_type=chart_type,
+        latency_ms=round((time.monotonic() - t_start) * 1000, 1),
+        tokens_used=tokens_used,
+        error=error,
+    ))
+
+
 def answer(
     question: str,
     history: list | None = None,
@@ -199,38 +234,79 @@ def answer(
 ) -> dict:
     corrections       = []
     original_question = question
+    _t_start          = time.monotonic()
+    tokens_used       = 0
 
     # ── Étape 0 : détection prompt adversarial ──────────────────────────
     if is_adversarial_prompt(question):
+        _emit_trace(
+            question=original_question, t_start=_t_start,
+            corrections=corrections, route="refused",
+            sql=None, sql_validated=None, rows=None, chart_type=None,
+            tokens_used=0, error=None,
+        )
         return get_adversarial_response()
 
-    # ── Étape 1 : correction fuzzy ──────────────────────────────────────
-    if should_apply_fuzzy(question):
-        corrected_q, corrections = extract_and_correct_entities(question)
-        if corrections:
-            question = corrected_q
-
-    # ── Étape 2 : routing ───────────────────────────────────────────────
-    route = classify(question)
-
-    if route == "rag" and _needs_sql_aggregation(question):
-        route = "sql"
-
-    # ── Étape 3a : chemin RAG ───────────────────────────────────────────
-    if route == "rag":
-        result = answer_with_rag(question)
-        if corrections:
-            result["text"] += _format_corrections(corrections)
-        result["route"]             = "rag"
-        result["ambiguous"]         = False
-        result["ambiguity_options"] = []
-        result["corrections"]       = corrections
-        return result
-
-    # ── Étape 3b : chemin SQL ───────────────────────────────────────────
+    # ── Étape 3b : chemin SQL — connexion ouverte tôt pour désambiguïsation
     conn = get_connection(read_only=True)
     try:
-        llm_output = classify_and_generate_sql(
+        # ── Étape 0b : désambiguïsation DB sur la question ORIGINALE ────
+        # Doit tourner AVANT le fuzzy pour éviter que "Bouaké" soit déjà
+        # remplacé par le nom complet d'une circo spécifique.
+        # On vérifie d'abord si la question sera routée vers SQL.
+        pre_route = classify(question)
+        if pre_route == "sql" or _needs_sql_aggregation(question):
+            ambig = detect_ambiguity(question, conn)
+            if ambig is not None:
+                _emit_trace(
+                    question=original_question, t_start=_t_start,
+                    corrections=corrections, route="disambiguation",
+                    sql=None, sql_validated=None, rows=None, chart_type=None,
+                    tokens_used=0, error=None,
+                )
+                return {
+                    "text":              ambig["question"],
+                    "dataframe":         None,
+                    "sql":               None,
+                    "chart_type":        None,
+                    "error":             None,
+                    "route":             "sql",
+                    "ambiguous":         True,
+                    "ambiguity_options": ambig["options"],
+                    "corrections":       corrections,
+                }
+
+        # ── Étape 1 : correction fuzzy ──────────────────────────────────
+        if should_apply_fuzzy(question):
+            corrected_q, corrections = extract_and_correct_entities(question)
+            if corrections:
+                question = corrected_q
+
+        # ── Étape 2 : routing ───────────────────────────────────────────
+        route = classify(question)
+
+        if route == "rag" and _needs_sql_aggregation(question):
+            route = "sql"
+
+        # ── Étape 3a : chemin RAG ────────────────────────────────────────
+        if route == "rag":
+            result = answer_with_rag(question)
+            if corrections:
+                result["text"] += _format_corrections(corrections)
+            result["route"]             = "rag"
+            result["ambiguous"]         = False
+            result["ambiguity_options"] = []
+            result["corrections"]       = corrections
+            _emit_trace(
+                question=original_question, t_start=_t_start,
+                corrections=corrections, route="rag",
+                sql=None, sql_validated=None, rows=None, chart_type=None,
+                tokens_used=0, error=None,
+            )
+            return result
+
+        # ── Étape 3b-1 : génération SQL par le LLM ─────────────────────
+        llm_output, tokens_used = classify_and_generate_sql(
             question,
             history=history,
             session_context=session_context,
@@ -239,13 +315,12 @@ def answer(
 
         # Question hors périmètre
         if intent == "out_of_scope":
-            rag_result = answer_with_rag(question)
-            if rag_result.get("citations"):
-                rag_result["route"]             = "rag_from_oos"
-                rag_result["ambiguous"]         = False
-                rag_result["ambiguity_options"] = []
-                rag_result["corrections"]       = corrections
-                return rag_result
+            _emit_trace(
+                question=original_question, t_start=_t_start,
+                corrections=corrections, route="refused",
+                sql=None, sql_validated=None, rows=None, chart_type=None,
+                tokens_used=tokens_used, error=None,
+            )
             return {
                 "text":              explain_refusal(original_question),
                 "dataframe":         None,
@@ -264,6 +339,12 @@ def answer(
         try:
             safe_sql = validate_sql(raw_sql)
         except SQLValidationError as e:
+            _emit_trace(
+                question=original_question, t_start=_t_start,
+                corrections=corrections, route="sql_blocked",
+                sql=raw_sql, sql_validated=False, rows=None, chart_type=None,
+                tokens_used=tokens_used, error=str(e),
+            )
             return {
                 "text":              f"Requête refusée pour sécurité : {e}",
                 "dataframe":         None,
@@ -289,6 +370,12 @@ def answer(
             rag_result["corrections"] = corrections
             if corrections:
                 rag_result["text"] += _format_corrections(corrections)
+            _emit_trace(
+                question=original_question, t_start=_t_start,
+                corrections=corrections, route="rag_exec_fallback",
+                sql=safe_sql, sql_validated=True, rows=None, chart_type=None,
+                tokens_used=tokens_used, error=str(exec_err),
+            )
             return rag_result
 
         # SQL retourne 0 résultats
@@ -301,6 +388,12 @@ def answer(
             )
             if corrections:
                 not_found_text += _format_corrections(corrections)
+            _emit_trace(
+                question=original_question, t_start=_t_start,
+                corrections=corrections, route="sql_empty",
+                sql=safe_sql, sql_validated=True, rows=0, chart_type=None,
+                tokens_used=tokens_used, error=None,
+            )
             return {
                 "text":              not_found_text,
                 "dataframe":         None,
@@ -321,7 +414,7 @@ def answer(
         if corrections:
             text += _format_corrections(corrections)
 
-        # Désambiguïsation (Level 3)
+        # Désambiguïsation LLM (complément au module DB)
         is_ambiguous      = llm_output.get("ambiguous", False)
         ambiguity_note    = llm_output.get("ambiguity_note", "")
         ambiguity_options = []
@@ -331,11 +424,18 @@ def answer(
             if "circonscription" in df.columns and len(df) > 1:
                 ambiguity_options = df["circonscription"].unique().tolist()
 
+        chart_type = llm_output.get("chart_type", "none")
+        _emit_trace(
+            question=original_question, t_start=_t_start,
+            corrections=corrections, route="sql",
+            sql=safe_sql, sql_validated=True, rows=len(df),
+            chart_type=chart_type, tokens_used=tokens_used, error=None,
+        )
         return {
             "text":              text,
             "dataframe":         df,
             "sql":               safe_sql,
-            "chart_type":        llm_output.get("chart_type", "none"),
+            "chart_type":        chart_type,
             "error":             None,
             "route":             "sql",
             "ambiguous":         is_ambiguous,
@@ -344,6 +444,12 @@ def answer(
         }
 
     except Exception as e:
+        _emit_trace(
+            question=original_question, t_start=_t_start,
+            corrections=corrections, route="error",
+            sql=None, sql_validated=None, rows=None, chart_type=None,
+            tokens_used=tokens_used, error=str(e),
+        )
         return {
             "text":              f"Une erreur est survenue : {str(e)}",
             "dataframe":         None,

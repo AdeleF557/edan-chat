@@ -1,4 +1,11 @@
 import re
+import unicodedata
+
+
+def _strip_accents(text: str) -> str:
+    """Supprime les accents pour la comparaison de patterns."""
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
 
 
 # Patterns SQL destructifs ou d'exfiltration
@@ -128,7 +135,7 @@ def is_adversarial_prompt(user_input: str) -> bool:
         r"montre.{0,20}base.{0,20}entiere",
         r"show.{0,20}entire.{0,20}database",
     ]
-    user_lower = user_input.lower()
+    user_lower = _strip_accents(user_input.lower())
     for pattern in adversarial_patterns:
         if re.search(pattern, user_lower, re.IGNORECASE):
             return True

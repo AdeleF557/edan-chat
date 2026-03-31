@@ -132,7 +132,7 @@ def get_all_entities(force_reload: bool = False) -> dict:
     global _CACHE
     if _CACHE and not force_reload:
         return _CACHE
-    conn = get_connection()
+    conn = get_connection(read_only=True)
     try:
         _CACHE = {
             "circonscription": [
@@ -218,12 +218,34 @@ def _is_plausible_entity(phrase_norm: str, window_size: int = 1) -> bool:
     return len(plausible_words) >= 1
 
 
+def _token_score(query_norm: str, candidate_norm: str) -> float:
+    """
+    Compare le query contre chaque token significatif d'un nom composé.
+    Permet à 'tiapum' de matcher 'tiapoum' dans
+    'noe, nouamou et tiapoum, communes et sous- prefectures'.
+    """
+    all_tokens = []
+    for clause in re.split(r",", candidate_norm):
+        for word in clause.strip().split():
+            clean = re.sub(r"[^a-z]", "", word)
+            if len(clean) >= 4:
+                all_tokens.append(clean)
+    if not all_tokens:
+        return 0.0
+    return max(fuzz.WRatio(query_norm, t) for t in all_tokens)
+
+
 def multi_score(query_norm: str, candidate_norm: str) -> float:
-    return max(
+    base = max(
         fuzz.WRatio(query_norm, candidate_norm),
         fuzz.partial_ratio(query_norm, candidate_norm),
         fuzz.token_sort_ratio(query_norm, candidate_norm),
     )
+    # Token-level uniquement pour les noms composés (multi-mots).
+    # Les noms simples (RHDP, PDCI, PORO) ne sont pas affectés.
+    if len(candidate_norm.split()) > 1:
+        base = max(base, _token_score(query_norm, candidate_norm))
+    return base
 
 
 def fuzzy_match(
